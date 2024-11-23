@@ -230,7 +230,11 @@ state_t * move_me(state_t * s,
 
     if (y1 < 0 || y1 > h || x1 < 0 || x1 > w ||
         board[c1] == wall)
-        return NULL;
+        {
+            printf("run task return NULL\n");
+            return NULL;
+        }
+        
 
     int at_box = 0;
     for (int i = 1; i <= n_boxes; i++) {
@@ -266,7 +270,7 @@ state_t * move_me(state_t * s,
         }
         if (!t) break;
     }
-
+    printf("run task fully\n");
     return n;
 }
 
@@ -287,10 +291,20 @@ bool queue_move(state_t * s) {
 }
 
 bool do_move(state_t * s) {
-    return queue_move(move_me(s, 0, 1)) ||
-        queue_move(move_me(s, 0, -1)) ||
-        queue_move(move_me(s, -1, 0)) ||
-        queue_move(move_me(s, 1, 0));
+    state_t* news[4];
+    printf("Create tasks\n");
+    #pragma omp task shared(s)
+        news[0]=move_me(s, 0, 1);
+    #pragma omp task shared(s)
+        news[1]=move_me(s, 0, -1);
+    #pragma omp task shared(s)
+        news[2]=move_me(s, -1, 0);
+    #pragma omp task shared(s)
+        news[3]=move_me(s, 1, 0);
+    
+    #pragma omp taskwait
+
+    return queue_move(news[0]) || queue_move(news[1]) || queue_move(news[2]) || queue_move(news[3]) ;
 }
 
 void show_moves(const state_t * s, int nextPos) {
