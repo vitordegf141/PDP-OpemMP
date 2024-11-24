@@ -11,6 +11,8 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <omp.h>
+#include <time.h>
 
 int w, h, n_boxes;
 uint8_t * board, * goals, * live;
@@ -21,7 +23,7 @@ typedef uint32_t hash_t;
 /* board configuration is represented by an array of cell indices
    of player and boxes */
 typedef struct state_t state_t;
-
+void show_moves(const state_t * s, int nextPos);
 struct state_t { // variable length
     hash_t h;
     state_t * prev, * next, * qnext;
@@ -30,6 +32,7 @@ struct state_t { // variable length
 
 size_t state_size, block_size = 32;
 state_t * block_root, * block_head;
+
 
 inline
 state_t * newstate(state_t * parent) {
@@ -186,7 +189,7 @@ void extend_table() {
 }
 
 state_t * lookup(state_t * s) {
-    hash(s);
+    hash(s);    
     state_t * f = buckets[s -> h & (hash_size - 1)];
     for (; f; f = f -> next) {
         if ( //(f->h == s->h) &&
@@ -198,18 +201,21 @@ state_t * lookup(state_t * s) {
 }
 
 bool add_to_table(state_t * s) {
+    #pragma omp critical
+    {
     if (lookup(s)) {
         unnewstate(s);
         return false;
+    }    
+        
+        if (filled++ >= fill_limit)
+            extend_table();
+
+        hash_t i = s -> h & (hash_size - 1);
+
+        s -> next = buckets[i];
+        buckets[i] = s;
     }
-
-    if (filled++ >= fill_limit)
-        extend_table();
-
-    hash_t i = s -> h & (hash_size - 1);
-
-    s -> next = buckets[i];
-    buckets[i] = s;
     return true;
 }
 
@@ -231,7 +237,6 @@ state_t * move_me(state_t * s,
     if (y1 < 0 || y1 > h || x1 < 0 || x1 > w ||
         board[c1] == wall)
         {
-            printf("run task return NULL\n");
             return NULL;
         }
         
@@ -270,36 +275,37 @@ state_t * move_me(state_t * s,
         }
         if (!t) break;
     }
-    printf("run task fully\n");
     return n;
 }
 
 state_t * next_level, * done;
 
-bool queue_move(state_t * s) {
-    if (!s || !add_to_table(s))
+bool queue_move(state_t * s) {    
+        if (!s || !add_to_table(s))
         return false;
 
-    if (success(s)) {
-        done = s;
-        return true;
+        if (success(s)) {
+            done = s;
+            return true;
+        }
+    #pragma omp critical
+    {    
+        s -> qnext = next_level;
+        next_level = s;
+        
     }
-
-    s -> qnext = next_level;
-    next_level = s;
     return false;
 }
 
 bool do_move(state_t * s) {
     state_t* news[4];
-    printf("Create tasks\n");
-    #pragma omp task shared(s)
+    #pragma omp task shared(s,news) 
         news[0]=move_me(s, 0, 1);
-    #pragma omp task shared(s)
+    #pragma omp task shared(s,news) 
         news[1]=move_me(s, 0, -1);
-    #pragma omp task shared(s)
+    #pragma omp task shared(s,news) 
         news[2]=move_me(s, -1, 0);
-    #pragma omp task shared(s)
+    #pragma omp task shared(s,news) 
         news[3]=move_me(s, 1, 0);
     
     #pragma omp taskwait
@@ -332,6 +338,10 @@ void show_moves(const state_t * s, int nextPos) {
 }
 
 int main() {
+    clock_t inicial_time;
+    clock_t final_time;
+    double time_passed;
+    inicial_time = clock();
     size_t sz = 1024;
     char * boardStr = malloc(sz * sizeof(char));
     char * pos = boardStr;
@@ -353,7 +363,11 @@ int main() {
     while (!done) {
         state_t * head = next_level;
         for (next_level = NULL; head && !done; head = head -> qnext)
-            do_move(head);
+        {
+            #pragma omp task shared(head)
+                do_move(head);
+        }
+        #pragma omp taskwait
 
         if (!next_level) {
             puts("no solution?");
@@ -373,5 +387,8 @@ int main() {
         free(block_root);
         block_root = tmp;
     }
+    final_time = clock();
+    time_passed = ((double)(final_time - inicial_time) )/CLOCKS_PER_SEC;
+    printf("\ntime passed = %f", time_passed);
     return 0;
 }
