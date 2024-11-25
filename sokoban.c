@@ -189,7 +189,7 @@ void extend_table() {
 }
 
 state_t * lookup(state_t * s) {
-    hash(s);    
+    hash(s);
     state_t * f = buckets[s -> h & (hash_size - 1)];
     for (; f; f = f -> next) {
         if ( //(f->h == s->h) &&
@@ -201,21 +201,18 @@ state_t * lookup(state_t * s) {
 }
 
 bool add_to_table(state_t * s) {
-    #pragma omp critical
-    {
     if (lookup(s)) {
         unnewstate(s);
         return false;
-    }    
-        
-        if (filled++ >= fill_limit)
-            extend_table();
-
-        hash_t i = s -> h & (hash_size - 1);
-
-        s -> next = buckets[i];
-        buckets[i] = s;
     }
+
+    if (filled++ >= fill_limit)
+        extend_table();
+
+    hash_t i = s -> h & (hash_size - 1);
+
+    s -> next = buckets[i];
+    buckets[i] = s;
     return true;
 }
 
@@ -280,7 +277,8 @@ state_t * move_me(state_t * s,
 
 state_t * next_level, * done;
 
-bool queue_move(state_t * s) {    
+bool queue_move(state_t * s) {
+    {
         if (!s || !add_to_table(s))
         return false;
 
@@ -288,28 +286,32 @@ bool queue_move(state_t * s) {
             done = s;
             return true;
         }
-    #pragma omp critical
-    {    
+
         s -> qnext = next_level;
         next_level = s;
-        
+        return false;
     }
-    return false;
+    
 }
+
 
 bool do_move(state_t * s) {
     state_t* news[4];
-    #pragma omp task shared(s,news) 
-        news[0]=move_me(s, 0, 1);
-    #pragma omp task shared(s,news) 
-        news[1]=move_me(s, 0, -1);
-    #pragma omp task shared(s,news) 
-        news[2]=move_me(s, -1, 0);
-    #pragma omp task shared(s,news) 
-        news[3]=move_me(s, 1, 0);
-    
+    #pragma omp parallel shared(s,news) 
+    {
+            #pragma omp single
+            {
+            #pragma omp task
+                news[0]=move_me(s, 0, 1);
+            #pragma omp task 
+                news[1]=move_me(s, 0, -1);
+            #pragma omp task 
+                news[2]=move_me(s, -1, 0);
+            #pragma omp task
+                news[3]=move_me(s, 1, 0);
+            }
     #pragma omp taskwait
-
+    }
     return queue_move(news[0]) || queue_move(news[1]) || queue_move(news[2]) || queue_move(news[3]) ;
 }
 
@@ -364,10 +366,9 @@ int main() {
         state_t * head = next_level;
         for (next_level = NULL; head && !done; head = head -> qnext)
         {
-            #pragma omp task shared(head)
                 do_move(head);
         }
-        #pragma omp taskwait
+        
 
         if (!next_level) {
             puts("no solution?");
