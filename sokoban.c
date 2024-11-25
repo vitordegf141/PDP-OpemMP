@@ -11,19 +11,20 @@
 #include <stdint.h>
 #include <assert.h>
 #include <stdbool.h>
-#include <omp.h>
 #include <time.h>
-
+#include <omp.h>
 int w, h, n_boxes;
 uint8_t * board, * goals, * live;
 
 typedef uint16_t cidx_t;
 typedef uint32_t hash_t;
 
+
+
 /* board configuration is represented by an array of cell indices
    of player and boxes */
 typedef struct state_t state_t;
-void show_moves(const state_t * s, int nextPos);
+
 struct state_t { // variable length
     hash_t h;
     state_t * prev, * next, * qnext;
@@ -32,7 +33,6 @@ struct state_t { // variable length
 
 size_t state_size, block_size = 32;
 state_t * block_root, * block_head;
-
 
 inline
 state_t * newstate(state_t * parent) {
@@ -175,6 +175,7 @@ void extend_table() {
     memset(buckets + old_size, 0, sizeof(state_t * ) * (hash_size - old_size));
 
     const hash_t bits = hash_size - 1;
+    #pragma omp parallel for
     for (int i = 0; i < old_size; i++) {
         state_t * head = buckets[i];
         buckets[i] = NULL;
@@ -233,10 +234,7 @@ state_t * move_me(state_t * s,
 
     if (y1 < 0 || y1 > h || x1 < 0 || x1 > w ||
         board[c1] == wall)
-        {
-            return NULL;
-        }
-        
+        return NULL;
 
     int at_box = 0;
     for (int i = 1; i <= n_boxes; i++) {
@@ -254,8 +252,12 @@ state_t * move_me(state_t * s,
         for (int i = 1; i <= n_boxes; i++)
             if (s -> c[i] == c2) return NULL;
     }
-
-    state_t * n = newstate(s);
+    state_t * n;
+    #pragma omp critical
+    {
+        n = newstate(s);
+    }
+    
     memcpy(n -> c + 1, s -> c + 1, sizeof(cidx_t) * n_boxes);
 
     cidx_t * p = n -> c;
@@ -272,49 +274,64 @@ state_t * move_me(state_t * s,
         }
         if (!t) break;
     }
+
     return n;
 }
 
 state_t * next_level, * done;
 
 bool queue_move(state_t * s) {
+    if (!s || !add_to_table(s))
     {
-        if (!s || !add_to_table(s))
+        //printf("failed to add to table\n");
         return false;
+    }
+        
+    //printf("successfully add to table\n");
+    if (success(s)) {
+        done = s;
+        return true;
+    }
 
-        if (success(s)) {
-            done = s;
-            return true;
+    s -> qnext = next_level;
+    next_level = s;
+    return false;
+}
+
+bool do_move(state_t * s) 
+{
+    state_t* states1;
+    state_t* states2;
+    state_t* states3;
+    state_t* states4;
+    //printf("\nbefore parallel\n");
+    #pragma omp parallel shared(states1,states2, states3, states4)
+    {
+        #pragma omp single
+        {
+            #pragma omp task 
+            states1 = move_me(s, 0, 1);
+            #pragma omp task 
+            states2 = move_me(s, 0,-1);
+            #pragma omp task 
+            states3 = move_me(s,-1, 0);
+            #pragma omp task 
+            states4 = move_me(s, 1, 0);   
         }
-
-        s -> qnext = next_level;
-        next_level = s;
-        return false;
+        #pragma omp taskwait
     }
-    
+    //printf("after parallel\n");
+    //printf("states1 %p states2 %p states3 %p states4 %p\n",states1,states2,states3,states4);
+   
+    //printf("states1 %d == states2 %d == states3 %d ==states4 states4 %d ==states1 \n",states1==states2,states2==states3,states3==states4,states4==states1);
+    return queue_move(states1)||queue_move(states2)||queue_move(states3)||queue_move(states4);
+    //printf("after parallel\n");
+    //sleep(5);
+   /*return queue_move(move_me(s, 0, 1)) ||
+        queue_move(move_me(s, 0, -1)) ||
+        queue_move(move_me(s, -1, 0)) ||
+        queue_move(move_me(s, 1, 0));*/
 }
-
-
-bool do_move(state_t * s) {
-    state_t* news[4];
-    #pragma omp parallel shared(s,news) 
-    {
-            #pragma omp single
-            {
-            #pragma omp task
-                news[0]=move_me(s, 0, 1);
-            #pragma omp task 
-                news[1]=move_me(s, 0, -1);
-            #pragma omp task 
-                news[2]=move_me(s, -1, 0);
-            #pragma omp task
-                news[3]=move_me(s, 1, 0);
-            }
-    #pragma omp taskwait
-    }
-    return queue_move(news[0]) || queue_move(news[1]) || queue_move(news[2]) || queue_move(news[3]) ;
-}
-
 void show_moves(const state_t * s, int nextPos) {
     if (s -> prev)
         show_moves(s -> prev, s -> c[0]);
@@ -345,6 +362,8 @@ int main() {
     double time_passed;
     inicial_time = clock();
     size_t sz = 1024;
+
+    
     char * boardStr = malloc(sz * sizeof(char));
     char * pos = boardStr;
     w = -1;
@@ -359,17 +378,16 @@ int main() {
     }
     state_t * s = parse_board(boardStr);
     free(boardStr);
-
+    //printf("pinta essa portta \n");
     extend_table();
     queue_move(s);
     while (!done) {
+        //printf("\nbefore for\n");
         state_t * head = next_level;
         for (next_level = NULL; head && !done; head = head -> qnext)
-        {
-                do_move(head);
-        }
-        
-
+            do_move(head);
+        //printf("\n after for\n");
+        //sleep(4);
         if (!next_level) {
             puts("no solution?");
             return 1;
