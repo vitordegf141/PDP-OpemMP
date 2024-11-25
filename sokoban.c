@@ -20,6 +20,10 @@ uint8_t * board, * goals, * live;
 typedef uint16_t cidx_t;
 typedef uint32_t hash_t;
 
+
+omp_lock_t writelock;
+omp_lock_t readerslock;
+omp_lock_t readers_count_lock;
 /* board configuration is represented by an array of cell indices
    of player and boxes */
 typedef struct state_t state_t;
@@ -187,36 +191,78 @@ void extend_table() {
         }
     }
 }
-
-state_t * lookup(state_t * s) {
-    hash(s);    
+int count_readers = 0;
+state_t * lookup(state_t * s, bool iswriter) {
+    hash(s);
+    if(!iswriter)
+    {
+        omp_set_lock(&writelock);
+        omp_unset_lock(&writelock);
+        
+        omp_set_lock(&readers_count_lock);
+        count_readers++;
+        if(count_readers == 1)
+        {
+            omp_set_lock(&readerslock);
+        }
+        omp_unset_lock(&readers_count_lock);
+    }
+    
     state_t * f = buckets[s -> h & (hash_size - 1)];
     for (; f; f = f -> next) {
         if ( //(f->h == s->h) &&
             !memcmp(s -> c, f -> c, sizeof(cidx_t) * (1 + n_boxes)))
             break;
     }
+    if(!iswriter)
+    {
+        omp_set_lock(&readers_count_lock);
+        count_readers--;
+        if(count_readers == 0)
+        {
+            omp_unset_lock(&readerslock);            
+        }
+            
+        omp_unset_lock(&readers_count_lock);
 
+    }
+    
     return f;
 }
 
 bool add_to_table(state_t * s) {
-    #pragma omp critical
-    {
-    if (lookup(s)) {
-        unnewstate(s);
-        return false;
-    }    
+    bool is_new = false;
+
         
-        if (filled++ >= fill_limit)
-            extend_table();
+        if (lookup(s,false)) {
+            unnewstate(s);
+            is_new= false;
+        }
+        else
+        {
+            omp_set_lock(&writelock); //stop all readers from reading
+            omp_set_lock(&readerslock); //wait all readers to finish reading
+            if(lookup(s,false))
+            {
+                unnewstate(s);
+                is_new= false;
+            }
+            else
+            {
+                if (filled++ >= fill_limit)
+                extend_table();
 
-        hash_t i = s -> h & (hash_size - 1);
+                hash_t i = s -> h & (hash_size - 1);
 
-        s -> next = buckets[i];
-        buckets[i] = s;
-    }
-    return true;
+                s -> next = buckets[i];
+                buckets[i] = s;
+                is_new=true;
+            }
+            omp_unset_lock(&writelock);
+            omp_set_lock(&readerslock);
+        }
+        
+    return is_new;
 }
 
 bool success(const state_t * s) {
@@ -285,7 +331,10 @@ bool queue_move(state_t * s) {
         return false;
 
         if (success(s)) {
-            done = s;
+            #pragma omp critical
+            {
+                done = s;
+            }
             return true;
         }
     #pragma omp critical
@@ -299,17 +348,21 @@ bool queue_move(state_t * s) {
 
 bool do_move(state_t * s) {
     state_t* news[4];
-    #pragma omp task shared(s,news) 
-        news[0]=move_me(s, 0, 1);
-    #pragma omp task shared(s,news) 
-        news[1]=move_me(s, 0, -1);
-    #pragma omp task shared(s,news) 
-        news[2]=move_me(s, -1, 0);
-    #pragma omp task shared(s,news) 
-        news[3]=move_me(s, 1, 0);
-    
-    #pragma omp taskwait
-
+    #pragma omp parallel shared(s,news) default(none)
+    {
+        #pragma omp single
+        {
+        #pragma omp task shared(s,news) 
+            news[0]=move_me(s, 0, 1);
+        #pragma omp task shared(s,news) 
+            news[1]=move_me(s, 0, -1);
+        #pragma omp task shared(s,news) 
+            news[2]=move_me(s, -1, 0);
+        #pragma omp task shared(s,news) 
+            news[3]=move_me(s, 1, 0);
+        }
+        #pragma omp taskwait
+    }
     return queue_move(news[0]) || queue_move(news[1]) || queue_move(news[2]) || queue_move(news[3]) ;
 }
 
@@ -347,6 +400,9 @@ int main() {
     char * pos = boardStr;
     w = -1;
     h = 0;
+    omp_init_lock(&writelock);
+    omp_init_lock(&readerslock);
+    omp_init_lock(&readers_count_lock);
     while (1) {
         int read = getline( & pos, & sz, stdin);
         if (read == -1) break;
@@ -357,18 +413,22 @@ int main() {
     }
     state_t * s = parse_board(boardStr);
     free(boardStr);
-
     extend_table();
     queue_move(s);
     while (!done) {
         state_t * head = next_level;
-        for (next_level = NULL; head && !done; head = head -> qnext)
+        #pragma omp parallel shared(head)
         {
-            #pragma omp task shared(head)
-                do_move(head);
+            #pragma omp single
+            {
+                for (next_level = NULL; head && !done; head = head -> qnext)
+                {
+                    #pragma omp task shared(head)
+                        do_move(head);
+                }
+            }
+            #pragma omp taskwait
         }
-        #pragma omp taskwait
-
         if (!next_level) {
             puts("no solution?");
             return 1;
@@ -390,5 +450,8 @@ int main() {
     final_time = clock();
     time_passed = ((double)(final_time - inicial_time) )/CLOCKS_PER_SEC;
     printf("\ntime passed = %f", time_passed);
+    omp_destroy_lock(&writelock);
+    omp_destroy_lock(&readerslock);
+    omp_destroy_lock(&readers_count_lock);
     return 0;
 }
