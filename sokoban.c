@@ -41,28 +41,49 @@ state_t * block_root, * block_head;
 
 
 inline
-state_t * newstate(state_t * parent) {
+state_t * newstate(state_t * parent,state_t * s) {
     inline state_t * next_of(state_t * s) {
         return (void * )((uint8_t * ) s + state_size);
     }
     //omp_set_lock(&newstate_lock);
     state_t * ptr;
-    if (!block_head) {
-        block_size *= 2;
-        state_t * p = malloc(block_size * state_size);
-        assert(p);
-        p -> next = block_root;
-        block_root = p;
-        ptr = (void * )((uint8_t * ) p + state_size * block_size);
-        p = block_head = next_of(p);
-        state_t * q;
-        for (q = next_of(p); q < ptr; p = q, q = next_of(q))
-            p -> next = q;
-        p -> next = NULL;
+    state_t * tmp;
+    #pragma omp critical
+    {
+        //quando chega no ultimo state do block, este aponta pra NULL
+        if (!block_head) {
+            block_size *= 2;
+            state_t * new_block = malloc(block_size * state_size);
+            
+            assert(new_block);
+            // o primeiro elemento do novo block aponta pro primeiro elemento do ultimo block
+            new_block -> next = block_root;
+            block_root = new_block;
+            //mem_block_size = state_size * block_size;
+            //novo_state= novo_block + mem_block_size apenas para fins de controle do final do bloco
+            ptr = (void * )((uint8_t * ) new_block + state_size * block_size);
+            //agora block_head = novo_state, por que? padding?
+            new_block = block_head = next_of(new_block);
+            state_t * q;
+            //q = block_head+state_size; q<ptr ; new_block=q,q=next_of(q))
+            // Vai até o ultimo state do block, colocando cada state apontando pro prox dentro do mesmo bloco
+            for (q = next_of(new_block); q < ptr; new_block = q, q = next_of(q))
+                new_block -> next = q;
+            // Agora o next do ultimo state aponta para NULL
+            new_block -> next = NULL;
+        }
+    
+        ptr = block_head;
+        tmp =block_head->next;
+        block_head = block_head -> next;
     }
-
-    ptr = block_head;
-    block_head = block_head -> next;
+    
+    //copia o novo estado para dentro do bloco
+    memccpy(ptr, s, 0, state_size);
+    if(s)
+        free(s);
+    ptr->next=tmp;
+    
 
     ptr -> prev = parent;
     ptr -> h = 0;
@@ -72,8 +93,7 @@ state_t * newstate(state_t * parent) {
 
 inline
 void unnewstate(state_t * p) {
-    p -> next = block_head;
-    block_head = p;
+    free(p);
 }
 
 enum {
@@ -135,8 +155,8 @@ state_t * parse_board(const char * s) {
     state_size = (sizeof(state_t) + (1 + n_boxes) * sizeof(cidx_t) + is - 1) /
         is * is;
 
-    state_t * state = newstate(NULL);
-
+    //state_t * state = newstate(NULL,malloc(state_size));
+    state_t * state = malloc(state_size);
     for (int i = 0, j = 0; i < w * h; i++) {
         if (goals[i]) mark_live(i);
         if (s[i] == '$' || s[i] == '*')
@@ -240,13 +260,11 @@ state_t * lookup(state_t * s, bool iswriter) {
     return f;
 }
 
-bool add_to_table(state_t * s) {
-    bool is_new = false;
-
-        
+state_t * add_to_table(state_t * s) {
+    state_t * is_new = NULL;
         if (lookup(s,false)) {
             unnewstate(s);
-            is_new= false;
+            is_new= NULL;
         }
         else
         {
@@ -257,18 +275,17 @@ bool add_to_table(state_t * s) {
             if(lookup(s,true))
             {
                 unnewstate(s);
-                is_new= false;
+                is_new= NULL;
             }
             else
             {
                 if (filled++ >= fill_limit)
                 extend_table();
-
+                is_new=newstate(s->prev,s);
                 hash_t i = s -> h & (hash_size - 1);
 
                 s -> next = buckets[i];
                 buckets[i] = s;
-                is_new=true;
             }
             
             omp_unset_lock(&writelock);
@@ -320,10 +337,9 @@ state_t * move_me(state_t * s,
     }
 
     state_t * n;
-    #pragma omp critical
-    {
-        n = newstate(s);
-    }
+    
+    n = malloc( state_size);
+    
     memcpy(n -> c + 1, s -> c + 1, sizeof(cidx_t) * n_boxes);
 
     cidx_t * p = n -> c;
@@ -347,8 +363,11 @@ state_t * next_level, * done;
 
 bool queue_move(state_t * s) {    
         if (!s || !add_to_table(s))
-        return false;
-
+        {
+            
+            return false;
+        }
+        
         if (success(s)) {
             #pragma omp critical
             {
@@ -435,8 +454,10 @@ int main() {
     }
     state_t * s = parse_board(boardStr);
     free(boardStr);
+    
     extend_table();
     queue_move(s);
+    
     while (!done) {
         state_t * head = next_level;
         #pragma omp parallel shared(s,head,writelock,readerslock,readers_count_lock,state_size,block_size,block_root,block_head,buckets,hash_size,fill_limit,filled,count_readers,next_level,done)
