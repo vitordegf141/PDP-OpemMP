@@ -8,7 +8,7 @@ CC=gcc
 all: $(EXEC)
 
 $(EXEC): sokoban.c
-	$(CC) $(FLAGS) $(EXEC).c -o $(EXEC)  -fopenmp
+	$(CC) $(FLAGS) $(EXEC).c -o $(EXEC)2  -fopenmp
 
 clean:
-	$(RM) $(EXEC)
+	$(RM) $(EXEC)2

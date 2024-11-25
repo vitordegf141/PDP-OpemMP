@@ -24,6 +24,8 @@ typedef uint32_t hash_t;
 omp_lock_t writelock;
 omp_lock_t readerslock;
 omp_lock_t readers_count_lock;
+
+omp_lock_t newstate_lock;
 /* board configuration is represented by an array of cell indices
    of player and boxes */
 typedef struct state_t state_t;
@@ -43,7 +45,7 @@ state_t * newstate(state_t * parent) {
     inline state_t * next_of(state_t * s) {
         return (void * )((uint8_t * ) s + state_size);
     }
-
+    //omp_set_lock(&newstate_lock);
     state_t * ptr;
     if (!block_head) {
         block_size *= 2;
@@ -64,6 +66,7 @@ state_t * newstate(state_t * parent) {
 
     ptr -> prev = parent;
     ptr -> h = 0;
+    //omp_unset_lock(&newstate_lock);
     return ptr;
 }
 
@@ -196,16 +199,20 @@ state_t * lookup(state_t * s, bool iswriter) {
     hash(s);
     if(!iswriter)
     {
+        //printf("reader setting writelock\n");
         omp_set_lock(&writelock);
         omp_unset_lock(&writelock);
-        
+        //printf("reader unsetting writelock\n");
+        //printf("reader setting readers_count_lock\n");
         omp_set_lock(&readers_count_lock);
         count_readers++;
         if(count_readers == 1)
         {
+            //printf("reader setting readerslock\n");
             omp_set_lock(&readerslock);
         }
         omp_unset_lock(&readers_count_lock);
+        //printf("reader unsetting readers_count_lock\n");
     }
     
     state_t * f = buckets[s -> h & (hash_size - 1)];
@@ -214,16 +221,19 @@ state_t * lookup(state_t * s, bool iswriter) {
             !memcmp(s -> c, f -> c, sizeof(cidx_t) * (1 + n_boxes)))
             break;
     }
-    if(!iswriter)
+    if(iswriter==false)
     {
+        //printf("reader setting readers_count_lock\n");
         omp_set_lock(&readers_count_lock);
         count_readers--;
         if(count_readers == 0)
         {
+            //printf("reader unsetting readerslock\n");
             omp_unset_lock(&readerslock);            
         }
             
         omp_unset_lock(&readers_count_lock);
+        //printf("reader unsetting readers_count_lock\n");
 
     }
     
@@ -240,9 +250,11 @@ bool add_to_table(state_t * s) {
         }
         else
         {
+            //printf("writer setting writelock\n");
             omp_set_lock(&writelock); //stop all readers from reading
+            //printf("writer readerslock writelock\n");
             omp_set_lock(&readerslock); //wait all readers to finish reading
-            if(lookup(s,false))
+            if(lookup(s,true))
             {
                 unnewstate(s);
                 is_new= false;
@@ -258,8 +270,11 @@ bool add_to_table(state_t * s) {
                 buckets[i] = s;
                 is_new=true;
             }
+            
             omp_unset_lock(&writelock);
-            omp_set_lock(&readerslock);
+            //printf("writer unsetting writelock\n");
+            omp_unset_lock(&readerslock);
+            //printf("writer unsetting readerslock\n");
         }
         
     return is_new;
@@ -304,7 +319,11 @@ state_t * move_me(state_t * s,
             if (s -> c[i] == c2) return NULL;
     }
 
-    state_t * n = newstate(s);
+    state_t * n;
+    #pragma omp critical
+    {
+        n = newstate(s);
+    }
     memcpy(n -> c + 1, s -> c + 1, sizeof(cidx_t) * n_boxes);
 
     cidx_t * p = n -> c;
@@ -347,30 +366,33 @@ bool queue_move(state_t * s) {
 }
 
 bool do_move(state_t * s) {
-    state_t* news[4];
-    #pragma omp parallel shared(s,news) default(none)
+    state_t* states[4];
+    #pragma omp parallel
     {
         #pragma omp single
         {
-        #pragma omp task shared(s,news) 
-            news[0]=move_me(s, 0, 1);
-        #pragma omp task shared(s,news) 
-            news[1]=move_me(s, 0, -1);
-        #pragma omp task shared(s,news) 
-            news[2]=move_me(s, -1, 0);
-        #pragma omp task shared(s,news) 
-            news[3]=move_me(s, 1, 0);
+            #pragma omp task shared(s,states)
+            states[0] = move_me(s, 0, 1);
+            #pragma omp task shared(s,states)
+            states[1] = move_me(s, 0,-1);
+            #pragma omp task shared(s,states)
+            states[2] = move_me(s,-1, 0);
+            #pragma omp task shared(s,states)
+            states[3] = move_me(s, 1, 0);
         }
-        #pragma omp taskwait
+        
     }
-    return queue_move(news[0]) || queue_move(news[1]) || queue_move(news[2]) || queue_move(news[3]) ;
+            
+        
+    #pragma omp taskwait
+    return queue_move(states[0]) || queue_move(states[1]) || queue_move(states[2]) || queue_move(states[3]) ;
 }
 
 void show_moves(const state_t * s, int nextPos) {
     if (s -> prev)
         show_moves(s -> prev, s -> c[0]);
     if (nextPos == -1) {
-        printf("\n");
+        //printf("\n");
         return;
     }
     int cx = s -> c[0] % w;
@@ -417,17 +439,16 @@ int main() {
     queue_move(s);
     while (!done) {
         state_t * head = next_level;
-        #pragma omp parallel shared(head)
+        #pragma omp parallel shared(s,head,writelock,readerslock,readers_count_lock,state_size,block_size,block_root,block_head,buckets,hash_size,fill_limit,filled,count_readers,next_level,done)
         {
             #pragma omp single
             {
                 for (next_level = NULL; head && !done; head = head -> qnext)
                 {
-                    #pragma omp task shared(head)
+                    #pragma omp task 
                         do_move(head);
                 }
             }
-            #pragma omp taskwait
         }
         if (!next_level) {
             puts("no solution?");
